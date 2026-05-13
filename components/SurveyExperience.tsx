@@ -206,9 +206,22 @@ export function SurveyExperience() {
             генерация условного сценария на два года. Без мотивационных клише; не медицинское и не
             юридическое заключение.
           </p>
-          <p className="fn-mono mx-auto mt-6 inline-block border border-amber-500/25 bg-amber-500/5 px-4 py-2 text-xs uppercase tracking-[0.2em] text-amber-100/90">
-            Стоимость: {FORECAST_PRICE_STARS} ★
-          </p>
+          <div className="mx-auto mt-8 flex flex-col items-center gap-1 border border-amber-500/25 bg-amber-500/5 px-8 py-4 sm:gap-2">
+            <p className="fn-mono text-[10px] uppercase tracking-[0.28em] text-amber-200/75">
+              Стоимость
+            </p>
+            <div className="flex items-center justify-center gap-3 sm:gap-4">
+              <span className="fn-serif text-4xl font-semibold tabular-nums tracking-tight text-amber-50 sm:text-2xl">
+                {FORECAST_PRICE_STARS}
+              </span>
+              <span
+                className="select-none text-6xl leading-none text-amber-300 drop-shadow-[0_0_24px_rgba(251,191,36,0.35)] sm:text-2xl sm:leading-none"
+                aria-hidden
+              >
+                ★
+              </span>
+            </div>
+          </div>
           <div className="mt-12 flex flex-col items-center gap-4 sm:flex-row sm:justify-center">
             <button
               type="button"
