@@ -1,31 +1,28 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ForecastPayload } from "@/lib/forecast-schema";
+import type { SurveyQuestion } from "@/lib/questions";
 import { FORECAST_PRICE_STARS } from "@/lib/pricing";
-import { SURVEY_QUESTIONS } from "@/lib/questions";
+import { ResultFeedback } from "@/components/ResultFeedback";
+import { TestHub } from "@/components/TestHub";
+import { getTest } from "@/lib/tests/catalog";
+import type { TestDefinition, TestId } from "@/lib/tests/types";
 
 type Yn = "yes" | "no";
 type AnswerState = { yn: Yn | null; detail: string };
+type Phase = "hub" | "survey" | "checkout" | "loading" | "result";
 
-const BLOCKS = [
-  { title: "I — Соматика и наблюдение", from: 0, to: 6 },
-  { title: "II — Занятость и финансы", from: 6, to: 12 },
-  { title: "III — Отношения и границы", from: 12, to: 18 },
-  { title: "IV — Стресс и регуляция", from: 18, to: 24 },
-  { title: "V — Работа и быт", from: 24, to: 30 },
-  { title: "VI — Риски и контроль", from: 30, to: 36 },
-] as const;
-
-function initialAnswers(): Record<string, AnswerState> {
-  return Object.fromEntries(
-    SURVEY_QUESTIONS.map((q) => [q.id, { yn: null, detail: "" }]),
-  );
+function initialAnswers(questions: SurveyQuestion[]): Record<string, AnswerState> {
+  return Object.fromEntries(questions.map((q) => [q.id, { yn: null, detail: "" }]));
 }
 
-function collectAnswers(answers: Record<string, AnswerState>): Record<string, { yn: Yn; detail?: string }> | null {
+function collectAnswers(
+  questions: SurveyQuestion[],
+  answers: Record<string, AnswerState>,
+): Record<string, { yn: Yn; detail?: string }> | null {
   const payload: Record<string, { yn: Yn; detail?: string }> = {};
-  for (const q of SURVEY_QUESTIONS) {
+  for (const q of questions) {
     const a = answers[q.id];
     if (!a?.yn) return null;
     payload[q.id] = { yn: a.yn, detail: a.detail.trim() || undefined };
@@ -45,9 +42,7 @@ async function pollGenerate(sessionId: string, initData: string): Promise<Foreca
       body: JSON.stringify({ sessionId, initData }),
     });
     const data = (await res.json()) as ForecastPayload & { error?: string; retry?: boolean };
-    if (res.ok && "sections" in data) {
-      return data;
-    }
+    if (res.ok && "sections" in data) return data;
     if (res.status === 402 && data.retry) {
       lastErr = data.error ?? lastErr;
       await new Promise((r) => setTimeout(r, 350 + i * 50));
@@ -59,29 +54,23 @@ async function pollGenerate(sessionId: string, initData: string): Promise<Foreca
 }
 
 export function SurveyExperience() {
-  const [phase, setPhase] = useState<
-    "intro" | "survey" | "checkout" | "loading" | "result"
-  >("intro");
+  const [phase, setPhase] = useState<Phase>("hub");
+  const [activeTestId, setActiveTestId] = useState<TestId | null>(null);
   const [blockIndex, setBlockIndex] = useState(0);
-  const [answers, setAnswers] = useState<Record<string, AnswerState>>(initialAnswers);
+  const [answers, setAnswers] = useState<Record<string, AnswerState>>({});
   const [error, setError] = useState<string | null>(null);
   const [forecast, setForecast] = useState<ForecastPayload | null>(null);
+  const surveyScrollAnchorRef = useRef<HTMLDivElement>(null);
   const [checkoutBusy, setCheckoutBusy] = useState(false);
   const [isTelegramUi, setIsTelegramUi] = useState(false);
 
-  const total = SURVEY_QUESTIONS.length;
-  const answeredCount = useMemo(
-    () => SURVEY_QUESTIONS.filter((q) => answers[q.id]?.yn !== null).length,
-    [answers],
-  );
-
-  const isTelegram = isTelegramUi;
+  const activeTest: TestDefinition | null = activeTestId ? getTest(activeTestId) : null;
+  const questions = activeTest?.questions ?? [];
+  const blocks = activeTest?.blocks ?? [];
 
   useEffect(() => {
     const tg = window.Telegram?.WebApp;
-    queueMicrotask(() => {
-      setIsTelegramUi(Boolean(tg?.initData));
-    });
+    queueMicrotask(() => setIsTelegramUi(Boolean(tg?.initData)));
     if (!tg) return;
     tg.ready();
     tg.expand?.();
@@ -89,62 +78,99 @@ export function SurveyExperience() {
     tg.setBackgroundColor?.("#030306");
   }, []);
 
+  useEffect(() => {
+    if (phase !== "survey") return;
+    const run = () => {
+      window.scrollTo({ top: 0, left: 0, behavior: "auto" });
+      surveyScrollAnchorRef.current?.scrollIntoView({ block: "start", behavior: "auto" });
+    };
+    requestAnimationFrame(run);
+  }, [blockIndex, phase]);
+
+  const startTest = useCallback((id: TestId) => {
+    const test = getTest(id);
+    if (!test) return;
+    setActiveTestId(id);
+    setAnswers(initialAnswers(test.questions));
+    setBlockIndex(0);
+    setForecast(null);
+    setError(null);
+    setPhase("survey");
+  }, []);
+
+  const resetHub = useCallback(() => {
+    setActiveTestId(null);
+    setAnswers({});
+    setBlockIndex(0);
+    setForecast(null);
+    setError(null);
+    setPhase("hub");
+  }, []);
+
+  const total = questions.length;
+  const answeredCount = useMemo(
+    () => questions.filter((q) => answers[q.id]?.yn !== null).length,
+    [answers, questions],
+  );
+
   const setYn = useCallback((id: string, yn: Yn) => {
-    setAnswers((prev) => ({
-      ...prev,
-      [id]: { ...prev[id], yn },
-    }));
+    setAnswers((prev) => ({ ...prev, [id]: { ...prev[id], yn } }));
   }, []);
 
   const setDetail = useCallback((id: string, detail: string) => {
-    setAnswers((prev) => ({
-      ...prev,
-      [id]: { ...prev[id], detail },
-    }));
+    setAnswers((prev) => ({ ...prev, [id]: { ...prev[id], detail } }));
   }, []);
 
-  const currentBlock = BLOCKS[blockIndex];
-  const blockQuestions = SURVEY_QUESTIONS.slice(currentBlock.from, currentBlock.to);
-
+  const currentBlock = blocks[blockIndex];
+  const blockQuestions = currentBlock
+    ? questions.slice(currentBlock.from, currentBlock.to)
+    : [];
   const blockComplete = blockQuestions.every((q) => answers[q.id]?.yn !== null);
-  const allComplete = SURVEY_QUESTIONS.every((q) => answers[q.id]?.yn !== null);
-
-  const progress = Math.round((answeredCount / total) * 100);
+  const allComplete = questions.every((q) => answers[q.id]?.yn !== null);
+  const progress = total ? Math.round((answeredCount / total) * 100) : 0;
 
   const goCheckout = useCallback(() => {
-    if (!allComplete) return;
+    if (!allComplete || activeTest?.tier !== "paid") return;
     setError(null);
     setPhase("checkout");
-  }, [allComplete]);
+  }, [allComplete, activeTest]);
 
-  async function submitFreeForecast() {
-    const payload = collectAnswers(answers);
-    if (!payload) return;
+  async function submitFreeTest() {
+    if (!activeTest || activeTest.tier !== "free") return;
+    const tg = window.Telegram?.WebApp;
+    const initData = tg?.initData?.trim() ?? "";
+    const payload = collectAnswers(questions, answers);
+    if (!payload || !initData) {
+      setError("Откройте из Telegram Mini App.");
+      return;
+    }
     setError(null);
     setPhase("loading");
     try {
-      const res = await fetch("/api/forecast", {
+      const res = await fetch("/api/forecast/free", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
+        body: JSON.stringify({ testId: activeTest.id, initData, answers: payload }),
       });
       const data = (await res.json()) as ForecastPayload & { error?: string };
       if (!res.ok) throw new Error(data.error ?? "Ошибка запроса");
       setForecast(data);
       setPhase("result");
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Сбой соединения");
-      setPhase("checkout");
+      setError(e instanceof Error ? e.message : "Сбой");
+      setPhase("survey");
     }
   }
 
   async function startTelegramPayment() {
+    if (!activeTest || activeTest.tier !== "paid") return;
     const tg = window.Telegram?.WebApp;
-    const initData = tg?.initData ?? "";
-    const payload = collectAnswers(answers);
+    tg?.ready?.();
+    const initData = tg?.initData?.trim() ?? "";
+    const payload = collectAnswers(questions, answers);
     const app = tg;
     if (!payload || !initData || !app?.openInvoice) {
-      setError("Нет данных Telegram Mini App. Откройте ссылку из бота.");
+      setError("Нет данных Telegram Mini App.");
       return;
     }
     setCheckoutBusy(true);
@@ -153,7 +179,11 @@ export function SurveyExperience() {
       const prep = await fetch("/api/forecast/prepare", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ initData, answers: payload }),
+        body: JSON.stringify({
+          initData,
+          answers: payload,
+          testId: activeTest.id,
+        }),
       });
       const prepJson = (await prep.json()) as {
         sessionId?: string;
@@ -177,7 +207,7 @@ export function SurveyExperience() {
             setPhase("checkout");
           }
         } else if (status === "failed") {
-          setError("Оплата не прошла");
+          setError("Оплата не прошла. Проверьте вебхук бота.");
         } else if (status === "cancelled") {
           setError(null);
         }
@@ -189,55 +219,12 @@ export function SurveyExperience() {
     }
   }
 
-  if (phase === "intro") {
-    return (
-      <div className="relative flex min-h-screen flex-col items-center justify-center px-6 py-24">
-        <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_80%_50%_at_50%_-20%,rgba(56,189,248,0.12),transparent)]" />
-        <div className="relative max-w-2xl text-center">
-          <p className="fn-mono mb-4 text-[11px] uppercase tracking-[0.35em] text-sky-400/90">
-            Протокол самоотчёта · горизонт 24 мес. · Telegram Mini App
-          </p>
-          <h1 className="fn-serif text-balance text-4xl font-medium tracking-tight text-zinc-50 sm:text-5xl">
-            Прогностическая карта
-          </h1>
-          <p className="mx-auto mt-6 max-w-xl text-pretty text-base leading-relaxed text-zinc-400">
-            36 вопросов с фиксированными ответами и полем уточнения. После заполнения — оплата{" "}
-            <span className="text-zinc-200">{FORECAST_PRICE_STARS} Telegram Stars</span>, затем
-            генерация условного сценария на два года. Без мотивационных клише; не медицинское и не
-            юридическое заключение.
-          </p>
-          <div className="mx-auto mt-8 flex flex-col items-center gap-1 border border-amber-500/25 bg-amber-500/5 px-8 py-4 sm:gap-2">
-            <p className="fn-mono text-[10px] uppercase tracking-[0.28em] text-amber-200/75">
-              Стоимость
-            </p>
-            <div className="flex items-center justify-center gap-3 sm:gap-4">
-              <span className="fn-serif text-4xl font-semibold tabular-nums tracking-tight text-amber-50 sm:text-2xl">
-                {FORECAST_PRICE_STARS}
-              </span>
-              <span
-                className="select-none text-6xl leading-none text-amber-300 drop-shadow-[0_0_24px_rgba(251,191,36,0.35)] sm:text-2xl sm:leading-none"
-                aria-hidden
-              >
-                ★
-              </span>
-            </div>
-          </div>
-          <div className="mt-12 flex flex-col items-center gap-4 sm:flex-row sm:justify-center">
-            <button
-              type="button"
-              onClick={() => setPhase("survey")}
-              className="group relative overflow-hidden rounded-none border border-sky-500/40 bg-sky-500/10 px-10 py-4 text-sm font-medium uppercase tracking-widest text-sky-100 transition hover:border-sky-400/60 hover:bg-sky-500/20"
-            >
-              <span className="relative z-10">Начать опрос</span>
-              <span className="pointer-events-none absolute inset-0 translate-x-[-100%] bg-gradient-to-r from-transparent via-white/10 to-transparent transition group-hover:translate-x-[100%] duration-700" />
-            </button>
-            <p className="max-w-xs text-left text-xs leading-relaxed text-zinc-600 sm:text-right">
-              Время: 12–22 мин. Отвечайте в спокойной обстановке.
-            </p>
-          </div>
-        </div>
-      </div>
-    );
+  if (phase === "hub") {
+    return <TestHub onSelect={startTest} />;
+  }
+
+  if (!activeTest) {
+    return <TestHub onSelect={startTest} />;
   }
 
   if (phase === "checkout") {
@@ -245,13 +232,12 @@ export function SurveyExperience() {
       <div className="flex min-h-screen flex-col items-center justify-center px-6 py-16">
         <div className="w-full max-w-lg border border-white/[0.08] bg-zinc-950/50 p-8 sm:p-10">
           <p className="fn-mono text-[10px] uppercase tracking-[0.35em] text-zinc-500">Оплата</p>
-          <h2 className="fn-serif mt-3 text-2xl text-zinc-50">Доступ к отчёту</h2>
+          <h2 className="fn-serif mt-3 text-2xl text-zinc-50">{activeTest.title}</h2>
           <p className="mt-4 text-sm leading-relaxed text-zinc-400">
-            Откроется стандартное окно Telegram. После успешной оплаты Stars отчёт формируется
-            автоматически (обычно до минуты).
+            После оплаты Stars отчёт формируется автоматически.
           </p>
           <div className="fn-mono mt-8 border border-zinc-800 px-4 py-3 text-center text-sm text-zinc-200">
-            {FORECAST_PRICE_STARS} Telegram Stars
+            {activeTest.priceStars} Telegram Stars
           </div>
           {error && (
             <div className="mt-6 border border-red-900/50 bg-red-950/30 px-4 py-3 text-sm text-red-200">
@@ -259,38 +245,25 @@ export function SurveyExperience() {
             </div>
           )}
           <div className="mt-8 flex flex-col gap-3">
-            {isTelegram ? (
+            {isTelegramUi ? (
               <button
                 type="button"
                 disabled={checkoutBusy}
                 onClick={() => void startTelegramPayment()}
                 className="border border-sky-500/50 bg-sky-500/15 px-6 py-4 text-xs font-medium uppercase tracking-widest text-sky-50 transition enabled:hover:bg-sky-500/25 disabled:opacity-40"
               >
-                {checkoutBusy ? "Открываем счёт…" : `Оплатить ${FORECAST_PRICE_STARS} ★`}
+                {checkoutBusy ? "Открываем счёт…" : `Оплатить ${activeTest.priceStars} ★`}
               </button>
             ) : (
-              <p className="text-sm text-zinc-500">
-                Мини-приложение не внутри Telegram (нет initData). Откройте тест из бота через кнопку
-                Mini App.
-              </p>
-            )}
-            {allowFreeBrowser && (
-              <button
-                type="button"
-                disabled={checkoutBusy}
-                onClick={() => void submitFreeForecast()}
-                className="border border-zinc-700 px-6 py-3 text-xs uppercase tracking-widest text-zinc-400 transition hover:border-zinc-500 hover:text-zinc-200"
-              >
-                Dev: без оплаты
-              </button>
+              <p className="text-sm text-zinc-500">Откройте из бота Telegram.</p>
             )}
             <button
               type="button"
               disabled={checkoutBusy}
               onClick={() => setPhase("survey")}
-              className="text-xs uppercase tracking-widest text-zinc-600 underline-offset-4 hover:text-zinc-400 hover:underline"
+              className="text-xs uppercase tracking-widest text-zinc-600 hover:text-zinc-400"
             >
-              Вернуться к вопросам
+              Назад к вопросам
             </button>
           </div>
         </div>
@@ -305,7 +278,7 @@ export function SurveyExperience() {
         <p className="fn-mono mt-8 text-xs uppercase tracking-[0.3em] text-zinc-500">
           Синтез сценария
         </p>
-        <p className="mt-2 text-sm text-zinc-400">Обычно 15–60 секунд</p>
+        <p className="mt-2 text-sm text-zinc-400">{activeTest.title}</p>
       </div>
     );
   }
@@ -316,40 +289,66 @@ export function SurveyExperience() {
         <div className="mx-auto max-w-3xl">
           <header className="mb-16 border-b border-white/10 pb-10">
             <p className="fn-mono text-[11px] uppercase tracking-[0.35em] text-sky-400/80">
-              Итоговый разбор
+              {activeTest.tier === "free" ? "Мини-разбор" : "Итоговый разбор"}
             </p>
             <h2 className="fn-serif mt-3 text-3xl font-medium text-zinc-50 sm:text-4xl">
-              Горизонт 24 месяца
+              {activeTest.resultTitle}
             </h2>
           </header>
           <div className="space-y-14">
             {forecast.sections.map((s) => (
-              <article
-                key={s.title}
-                className="border-l border-sky-500/30 pl-6 sm:pl-8"
-              >
-                <h3 className="fn-mono text-xs uppercase tracking-widest text-zinc-500">
-                  {s.title}
-                </h3>
+              <article key={s.title} className="border-l border-sky-500/30 pl-6 sm:pl-8">
+                <h3 className="fn-mono text-xs uppercase tracking-widest text-zinc-500">{s.title}</h3>
                 <p className="mt-4 whitespace-pre-wrap text-[15px] leading-7 text-zinc-300">
                   {s.content}
                 </p>
+                {s.recommendations.length > 0 && (
+                  <div className="mt-8 border-t border-white/[0.06] pt-8">
+                    <p className="fn-mono text-[10px] uppercase tracking-[0.28em] text-sky-500/90">
+                      Рекомендации
+                    </p>
+                    <ul className="mt-4 list-none space-y-3 text-[14px] leading-relaxed text-zinc-200">
+                      {s.recommendations.map((item, idx) => (
+                        <li key={`${s.title}-${idx}`} className="flex gap-3">
+                          <span className="fn-mono mt-0.5 shrink-0 text-[11px] text-zinc-600">
+                            {(idx + 1).toString().padStart(2, "0")}
+                          </span>
+                          <span>{item}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
               </article>
             ))}
           </div>
-          <footer className="mt-20 border-t border-white/10 pt-10">
+          {activeTest.tier === "paid" && <ResultFeedback />}
+          {activeTest.tier === "free" && (
+            <div className="border border-amber-500/20 bg-amber-500/5 p-6 text-sm text-zinc-300">
+              <p className="fn-mono text-[10px] uppercase tracking-widest text-amber-200/80">
+                Полный протокол
+              </p>
+              <p className="mt-3 leading-relaxed">
+                Это пробный срез. В платных тестах — в 2–3 раза больше вопросов, больше блоков и
+                детальнее сценарий на 12–24 месяца.
+              </p>
+              <button
+                type="button"
+                onClick={resetHub}
+                className="mt-4 border border-sky-500/40 px-6 py-3 text-xs uppercase tracking-widest text-sky-100"
+              >
+                Выбрать полный протокол · {FORECAST_PRICE_STARS} ★
+              </button>
+            </div>
+          )}
+          <footer className="mt-12 border-t border-white/10 pt-10">
             <p className="text-sm leading-relaxed text-zinc-500">{forecast.methodology_note}</p>
             <button
               type="button"
-              onClick={() => {
-                setAnswers(initialAnswers());
-                setBlockIndex(0);
-                setForecast(null);
-                setPhase("intro");
-              }}
+              onClick={resetHub}
               className="mt-8 border border-zinc-700 px-6 py-3 text-xs font-medium uppercase tracking-widest text-zinc-400 transition hover:border-zinc-500 hover:text-zinc-200"
             >
-              Новый проход
+              Другой тест
             </button>
           </footer>
         </div>
@@ -357,75 +356,77 @@ export function SurveyExperience() {
     );
   }
 
+  const isFree = activeTest.tier === "free";
+  const qIndex = (id: string) => questions.findIndex((x) => x.id === id) + 1;
+
   return (
     <div className="min-h-screen pb-32 pt-8 sm:pt-12">
+      <div ref={surveyScrollAnchorRef} className="h-px w-full scroll-mt-4" aria-hidden />
       <div className="mx-auto max-w-3xl px-4 sm:px-6">
-        <header className="mb-10 flex flex-col gap-6 sm:flex-row sm:items-end sm:justify-between">
-          <div>
-            <p className="fn-mono text-[10px] uppercase tracking-[0.35em] text-zinc-600">
-              Блок {blockIndex + 1} / {BLOCKS.length}
+        <header className="mb-10">
+          <button
+            type="button"
+            onClick={resetHub}
+            className="fn-mono text-[10px] uppercase tracking-widest text-zinc-600 hover:text-zinc-400"
+          >
+            ← Все тесты
+          </button>
+          <p className="fn-mono mt-4 text-[10px] uppercase tracking-[0.35em] text-sky-400/80">
+            {activeTest.tagline}
+          </p>
+          <h2 className="fn-serif mt-2 text-2xl text-zinc-100">{activeTest.title}</h2>
+          {currentBlock && (
+            <p className="fn-mono mt-2 text-[10px] uppercase tracking-widest text-zinc-600">
+              Блок {blockIndex + 1} / {blocks.length} · {currentBlock.title}
             </p>
-            <h2 className="fn-serif mt-1 text-2xl text-zinc-100">{currentBlock.title}</h2>
-          </div>
-          <div className="w-full sm:max-w-[200px]">
+          )}
+          <div className="mt-6 w-full sm:max-w-[200px]">
             <div className="fn-mono flex justify-between text-[10px] uppercase tracking-widest text-zinc-600">
               <span>Прогресс</span>
               <span>{progress}%</span>
             </div>
             <div className="mt-2 h-1 w-full bg-zinc-900">
               <div
-                className="h-full bg-sky-500/70 transition-[width] duration-500 ease-out"
+                className="h-full bg-sky-500/70 transition-[width] duration-500"
                 style={{ width: `${progress}%` }}
               />
             </div>
           </div>
         </header>
 
-        {error && phase === "survey" && (
+        {error && (
           <div className="mb-8 border border-red-900/50 bg-red-950/30 px-4 py-3 text-sm text-red-200">
             {error}
           </div>
         )}
 
         <div className="space-y-10">
-          {blockQuestions.map((q, i) => (
-            <div
-              key={q.id}
-              className="border border-white/[0.06] bg-zinc-950/40 p-6 sm:p-8"
-              style={{ animationDelay: `${i * 40}ms` }}
-            >
+          {blockQuestions.map((q) => (
+            <div key={q.id} className="border border-white/[0.06] bg-zinc-950/40 p-6 sm:p-8">
               <p className="fn-mono text-[10px] text-zinc-600">
-                Вопрос {SURVEY_QUESTIONS.findIndex((x) => x.id === q.id) + 1} / {total}
+                Вопрос {qIndex(q.id)} / {total}
               </p>
               <p className="mt-3 text-[15px] leading-relaxed text-zinc-200">{q.text}</p>
               {q.context && (
-                <p className="mt-3 border-l border-amber-500/30 pl-3 text-xs leading-relaxed text-amber-200/70">
+                <p className="mt-3 border-l border-amber-500/30 pl-3 text-xs text-amber-200/70">
                   {q.context}
                 </p>
               )}
               <div className="mt-6 flex flex-wrap gap-3">
-                {(
-                  [
-                    { key: "yes" as const, label: "Да" },
-                    { key: "no" as const, label: "Нет" },
-                  ] as const
-                ).map(({ key, label }) => {
-                  const active = answers[q.id]?.yn === key;
-                  return (
-                    <button
-                      key={key}
-                      type="button"
-                      onClick={() => setYn(q.id, key)}
-                      className={`min-w-[100px] border px-5 py-2.5 text-xs font-medium uppercase tracking-widest transition ${
-                        active
-                          ? "border-sky-400/60 bg-sky-500/15 text-sky-100"
-                          : "border-zinc-800 text-zinc-500 hover:border-zinc-600 hover:text-zinc-300"
-                      }`}
-                    >
-                      {label}
-                    </button>
-                  );
-                })}
+                {(["yes", "no"] as const).map((key) => (
+                  <button
+                    key={key}
+                    type="button"
+                    onClick={() => setYn(q.id, key)}
+                    className={`min-w-[100px] border px-5 py-2.5 text-xs font-medium uppercase tracking-widest transition ${
+                      answers[q.id]?.yn === key
+                        ? "border-sky-400/60 bg-sky-500/15 text-sky-100"
+                        : "border-zinc-800 text-zinc-500 hover:border-zinc-600"
+                    }`}
+                  >
+                    {key === "yes" ? "Да" : "Нет"}
+                  </button>
+                ))}
               </div>
               <label className="mt-6 block">
                 <span className="fn-mono text-[10px] uppercase tracking-widest text-zinc-600">
@@ -435,7 +436,6 @@ export function SurveyExperience() {
                   value={answers[q.id]?.detail ?? ""}
                   onChange={(e) => setDetail(q.id, e.target.value)}
                   rows={2}
-                  placeholder="Контекст, который снижает двусмысленность ответа"
                   className="mt-2 w-full resize-y border border-zinc-800 bg-black/40 px-3 py-2 text-sm text-zinc-200 placeholder:text-zinc-700 focus:border-sky-500/40 focus:outline-none"
                 />
               </label>
@@ -447,28 +447,37 @@ export function SurveyExperience() {
           <button
             type="button"
             disabled={blockIndex === 0}
-            onClick={() => setBlockIndex((idx) => Math.max(0, idx - 1))}
-            className="border border-zinc-800 px-6 py-3 text-xs font-medium uppercase tracking-widest text-zinc-500 transition enabled:hover:border-zinc-600 enabled:hover:text-zinc-300 disabled:opacity-30"
+            onClick={() => setBlockIndex((i) => Math.max(0, i - 1))}
+            className="border border-zinc-800 px-6 py-3 text-xs uppercase tracking-widest text-zinc-500 disabled:opacity-30"
           >
             Назад
           </button>
-          {blockIndex < BLOCKS.length - 1 ? (
+          {blockIndex < blocks.length - 1 ? (
             <button
               type="button"
               disabled={!blockComplete}
-              onClick={() => blockComplete && setBlockIndex((idx) => idx + 1)}
-              className="border border-sky-600/40 bg-sky-500/10 px-8 py-3 text-xs font-medium uppercase tracking-widest text-sky-100 transition enabled:hover:bg-sky-500/20 disabled:opacity-30"
+              onClick={() => blockComplete && setBlockIndex((i) => i + 1)}
+              className="border border-sky-600/40 bg-sky-500/10 px-8 py-3 text-xs uppercase tracking-widest text-sky-100 disabled:opacity-30"
             >
               Далее
+            </button>
+          ) : isFree ? (
+            <button
+              type="button"
+              disabled={!allComplete}
+              onClick={() => void submitFreeTest()}
+              className="border border-emerald-500/50 bg-emerald-500/15 px-8 py-3 text-xs uppercase tracking-widest text-emerald-50 disabled:opacity-30"
+            >
+              Получить мини-разбор
             </button>
           ) : (
             <button
               type="button"
               disabled={!allComplete}
               onClick={goCheckout}
-              className="border border-sky-500/50 bg-sky-500/15 px-8 py-3 text-xs font-medium uppercase tracking-widest text-sky-50 transition enabled:hover:bg-sky-500/25 disabled:opacity-30"
+              className="border border-sky-500/50 bg-sky-500/15 px-8 py-3 text-xs uppercase tracking-widest text-sky-50 disabled:opacity-30"
             >
-              К оплате · {FORECAST_PRICE_STARS} ★
+              К оплате · {activeTest.priceStars} ★
             </button>
           )}
         </nav>

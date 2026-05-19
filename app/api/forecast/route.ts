@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { validateAnswers } from "@/lib/answers";
+import { validateAnswersForTest } from "@/lib/answers";
 import { generateForecastFromAnswers } from "@/lib/generate-forecast";
 
 /** Только для локальной отладки в браузере без Telegram. В продакшене не включать. */
@@ -22,7 +22,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Некорректное тело запроса" }, { status: 400 });
   }
 
-  if (!validateAnswers(body)) {
+  if (!validateAnswersForTest("paid_map24", body)) {
     return NextResponse.json(
       { error: "Не все вопросы отвечены или формат ответа неверный" },
       { status: 400 },
@@ -30,7 +30,7 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    const forecast = await generateForecastFromAnswers(body);
+    const forecast = await generateForecastFromAnswers("paid_map24", body);
     return NextResponse.json(forecast);
   } catch (e) {
     const message = e instanceof Error ? e.message : "Неизвестная ошибка";

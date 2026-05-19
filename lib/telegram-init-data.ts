@@ -1,40 +1,77 @@
-import crypto from "node:crypto";
+import {
+  AuthDateInvalidError,
+  ExpiredError,
+  isValid,
+  parse,
+  SignatureInvalidError,
+  SignatureMissingError,
+  validate,
+} from "@tma.js/init-data-node";
 
 const MAX_AUTH_AGE_SEC = 24 * 60 * 60;
 
+/** Убирает обёртку URL, если initData скопировали из адресной строки. */
+export function normalizeInitData(raw: string): string {
+  let s = raw.trim();
+  if (s.startsWith("?")) s = s.slice(1);
+  const tgPrefix = "tgWebAppData=";
+  const idx = s.indexOf(tgPrefix);
+  if (idx >= 0) {
+    s = s.slice(idx + tgPrefix.length);
+    try {
+      s = decodeURIComponent(s);
+    } catch {
+      /* keep as-is */
+    }
+  }
+  return s;
+}
+
 export function validateTelegramInitData(initData: string, botToken: string): boolean {
-  if (!initData || !botToken) return false;
-  const params = new URLSearchParams(initData);
-  const hash = params.get("hash")?.toLowerCase();
-  if (!hash) return false;
-  params.delete("hash");
+  const token = botToken.trim();
+  const normalized = normalizeInitData(initData);
+  if (!normalized || !token) return false;
+  return isValid(normalized, token, { expiresIn: MAX_AUTH_AGE_SEC });
+}
 
-  const pairs: [string, string][] = [];
-  params.forEach((value, key) => pairs.push([key, value]));
-  pairs.sort((a, b) => a[0].localeCompare(b[0]));
-  const dataCheckString = pairs.map(([k, v]) => `${k}=${v}`).join("\n");
+export type InitDataValidationFailure =
+  | "empty"
+  | "missing_hash"
+  | "invalid_auth_date"
+  | "expired"
+  | "invalid_signature"
+  | "unknown";
 
-  const secretKey = crypto.createHmac("sha256", "WebAppData").update(botToken).digest();
-  const hmac = crypto.createHmac("sha256", secretKey).update(dataCheckString).digest("hex");
-  if (hmac.length !== hash.length) return false;
+export function explainInitDataFailure(
+  initData: string,
+  botToken: string,
+): InitDataValidationFailure | null {
+  const token = botToken.trim();
+  const normalized = normalizeInitData(initData);
+  if (!normalized || !token) return "empty";
   try {
-    return crypto.timingSafeEqual(Buffer.from(hmac, "hex"), Buffer.from(hash, "hex"));
-  } catch {
-    return false;
+    validate(normalized, token, { expiresIn: MAX_AUTH_AGE_SEC });
+    return null;
+  } catch (e) {
+    if (e instanceof SignatureMissingError) return "missing_hash";
+    if (e instanceof AuthDateInvalidError) return "invalid_auth_date";
+    if (e instanceof ExpiredError) return "expired";
+    if (e instanceof SignatureInvalidError) return "invalid_signature";
+    return "unknown";
   }
 }
 
 export function parseInitDataUser(initData: string): { userId: number; authDate: number } | null {
-  const params = new URLSearchParams(initData);
-  const rawUser = params.get("user");
-  const rawAuth = params.get("auth_date");
-  if (!rawUser || rawAuth == null) return null;
+  const normalized = normalizeInitData(initData);
+  if (!normalized) return null;
   try {
-    const user = JSON.parse(rawUser) as { id?: number };
-    if (typeof user.id !== "number") return null;
-    const authDate = Number(rawAuth);
-    if (!Number.isFinite(authDate)) return null;
-    return { userId: user.id, authDate };
+    const data = parse(normalized);
+    const userId = data.user?.id;
+    const authDate = data.auth_date;
+    if (typeof userId !== "number" || authDate == null) return null;
+    const ts = authDate instanceof Date ? Math.floor(authDate.getTime() / 1000) : Number(authDate);
+    if (!Number.isFinite(ts)) return null;
+    return { userId, authDate: ts };
   } catch {
     return null;
   }

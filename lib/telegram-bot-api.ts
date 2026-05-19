@@ -41,3 +41,67 @@ export async function answerPreCheckoutQuery(botToken: string, preCheckoutQueryI
     error_message: ok ? undefined : "Сессия недоступна",
   });
 }
+
+/** Текст в чат (ответ на /start и т.п.). */
+export async function sendTelegramChatMessage(
+  botToken: string,
+  chatId: number,
+  text: string,
+): Promise<void> {
+  await tgCall<unknown>(botToken, "sendMessage", {
+    chat_id: chatId,
+    text,
+    disable_web_page_preview: true,
+  });
+}
+
+/** Ответ на /start: текст + кнопка, сразу открывающая Mini App (одно нажатие). */
+export async function sendTelegramStartWithWebApp(
+  botToken: string,
+  chatId: number,
+  params: { text: string; webAppUrl: string; buttonText?: string },
+): Promise<void> {
+  const { text, webAppUrl, buttonText = "Открыть приложение" } = params;
+  await tgCall<unknown>(botToken, "sendMessage", {
+    chat_id: chatId,
+    text,
+    disable_web_page_preview: true,
+    reply_markup: {
+      inline_keyboard: [[{ text: buttonText, web_app: { url: webAppUrl } }]],
+    },
+  });
+}
+
+/** Кнопка меню слева от поля ввода (на весь бот). Вызовите один раз при настройке. */
+export async function setBotMenuWebApp(
+  botToken: string,
+  webAppUrl: string,
+  buttonText = "Открыть",
+): Promise<void> {
+  await tgCall<unknown>(botToken, "setChatMenuButton", {
+    menu_button: {
+      type: "web_app",
+      text: buttonText,
+      web_app: { url: webAppUrl },
+    },
+  });
+}
+
+export type WebhookInfoResult = {
+  url?: string;
+  has_custom_certificate?: boolean;
+  pending_update_count?: number;
+  last_error_date?: number;
+  last_error_message?: string;
+  max_connections?: number;
+  allowed_updates?: string[];
+};
+
+export async function getWebhookInfo(botToken: string): Promise<WebhookInfoResult> {
+  const res = await fetch(`https://api.telegram.org/bot${botToken}/getWebhookInfo`);
+  const json = (await res.json()) as TelegramApiOk<WebhookInfoResult>;
+  if (!json.ok) {
+    throw new Error(json.description ?? "getWebhookInfo failed");
+  }
+  return json.result;
+}

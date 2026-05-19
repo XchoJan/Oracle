@@ -1,12 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
-import { recordTestCompleted } from "@/lib/record-test-completed";
-import { deleteSession, getSession } from "@/lib/forecast-session-store";
+import { validateAnswersForTest, parseTestIdFromBody } from "@/lib/answers";
 import { generateForecastFromAnswers } from "@/lib/generate-forecast";
+import { recordTestCompleted } from "@/lib/record-test-completed";
+import { getTest } from "@/lib/tests/catalog";
 import {
   assertFreshAuth,
   parseInitDataUser,
   validateTelegramInitData,
 } from "@/lib/telegram-init-data";
+import type { AnswerBody } from "@/lib/answers-types";
 
 export async function POST(req: NextRequest) {
   const botToken = process.env.TELEGRAM_BOT_TOKEN?.trim();
@@ -22,41 +24,36 @@ export async function POST(req: NextRequest) {
   }
 
   const rec = body as Record<string, unknown>;
-  const initData = typeof rec.initData === "string" ? rec.initData : "";
-  const sessionId = typeof rec.sessionId === "string" ? rec.sessionId : "";
+  const testId = parseTestIdFromBody(rec);
+  if (!testId) {
+    return NextResponse.json({ error: "Укажите testId" }, { status: 400 });
+  }
 
+  const test = getTest(testId);
+  if (!test || test.tier !== "free") {
+    return NextResponse.json({ error: "Тест недоступен бесплатно" }, { status: 400 });
+  }
+
+  const initData = typeof rec.initData === "string" ? rec.initData : "";
   if (!initData || !validateTelegramInitData(initData, botToken)) {
     return NextResponse.json({ error: "Недействительные данные Telegram" }, { status: 401 });
   }
 
   const user = parseInitDataUser(initData);
   if (!user || !assertFreshAuth(user.authDate)) {
-    return NextResponse.json({ error: "Сессия Telegram устарела, перезапустите мини-приложение" }, { status: 401 });
+    return NextResponse.json({ error: "Сессия Telegram устарела" }, { status: 401 });
   }
 
-  if (!sessionId || sessionId.length > 128) {
-    return NextResponse.json({ error: "Некорректный sessionId" }, { status: 400 });
-  }
-
-  const session = await getSession(sessionId);
-  if (!session) {
-    return NextResponse.json({ error: "Сессия не найдена или отчёт уже выдан" }, { status: 404 });
-  }
-
-  if (session.telegramUserId !== user.userId) {
-    return NextResponse.json({ error: "Несовпадение пользователя" }, { status: 403 });
-  }
-
-  if (!session.paid) {
-    return NextResponse.json(
-      { error: "Оплата не подтверждена", retry: true },
-      { status: 402 },
-    );
+  const answers = rec.answers;
+  if (!validateAnswersForTest(testId, answers)) {
+    return NextResponse.json({ error: "Не все вопросы отвечены" }, { status: 400 });
   }
 
   try {
-    const forecast = await generateForecastFromAnswers(session.testId, session.answers);
-    await deleteSession(sessionId);
+    const forecast = await generateForecastFromAnswers(
+      testId,
+      answers as Record<string, AnswerBody>,
+    );
     recordTestCompleted();
     return NextResponse.json(forecast);
   } catch (e) {

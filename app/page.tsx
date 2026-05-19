@@ -1,5 +1,5 @@
-import { SurveyExperience } from "@/components/SurveyExperience";
+import { HomeGate } from "@/components/HomeGate";
 
 export default function Home() {
-  return <SurveyExperience />;
+  return <HomeGate />;
 }
